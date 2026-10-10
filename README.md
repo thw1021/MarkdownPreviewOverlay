@@ -82,6 +82,21 @@ Settings can be customized via `Preferences -> Package Settings -> MarkdownPrevi
 | **`resolve_image_paths`** | Rewrite local relative image paths to absolute `file://` URIs for rendering (enabled by default: `true`). Set to `false` if prefer image paths to be untouched. |
 | **`image_max_width`** | Maximum display width in pixels for rendered images when `resolve_image_paths` is enabled (default: `900`). |
 | **`keyboard_scroll_lines`** | Number of lines to scroll per arrow key press (Up/Down) in preview mode (default: `3.0`). |
+| **`hard_line_breaks`** | Render every source newline inside a paragraph as a visible line break. Keep `false` (default) so hard-wrapped prose flows together like GitHub. |
+| **`wrap_code_blocks`** | Wrap long code lines inside fenced blocks instead of running them past the right edge (default: `true`). |
+| **`preview_wrap_width`** | Column width used in preview, in characters. `null` (default) is a fixed 100-column measure that only re-centers when you resize, ignoring your editor's `wrap_width`; set a number for a different fixed width. |
+| **`preview_font_family`** | Font used while previewing (default: `null` = your editor font). A proportional CJK font such as `"Noto Sans CJK SC"` removes the double-width ideograph cells that monospace coding fonts leave looking gappy. |
+| **`table_column_divider`** | Draw a vertical rule between table columns (default: `true`). |
+
+Documents that declare their own `markdown_extensions` or `allow_code_wrap` YAML front matter keep their own configuration.
+
+### Rendering Notes
+
+- **Ordered lists**: `minihtml` only draws `disc`/`circle`/`square` bullets, so numbered lists are rebuilt with literal `1.`/`2.` markers (honouring `start` and `type`), and nested bullet levels switch glyph by depth.
+- **Nested lists**: sub-lists indented by 2–3 columns — the CommonMark style most editors produce — are re-indented to 4-column steps so they actually nest instead of flattening into siblings.
+- **Prose wrapping**: `markdown.extensions.nl2br` is dropped by default, so a paragraph written across several source lines renders as one flowing paragraph.
+- **Tables**: `minihtml` has no `<table>` support, so the grid is laid out by character cell in your editor font, and its budget is the same reading column the prose uses, so a table never runs wider than the text.
+- **Centering**: the view's `margin` does not offset block phantoms, so the preview box stays full-width and the column is centered with computed pixel padding inside the phantom.
 
 ### Key Bindings
 

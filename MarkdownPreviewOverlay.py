@@ -25,8 +25,12 @@ from .overlay.styles import (
     ANNOTATION_RESERVED_WIDTH,
 )
 from .overlay.md_render import (
+    apply_render_settings,
+    css_font_family,
     estimate_markdown_scroll_ratio,
+    normalize_list_indentation,
     render_markdown_tables_as_html,
+    render_ordered_lists,
     resolve_markdown_image_paths,
 )
 
@@ -39,6 +43,8 @@ STATUS_KEY = "markdown_preview_overlay"
 SETTINGS_NAME = "MarkdownPreviewOverlay.sublime-settings"
 SETTINGS_KEY = "markdown_preview_overlay.settings"
 PREVIEW_MARGIN = 16
+# Fixed reading measure: the column keeps this width and only its centering moves.
+PREVIEW_READING_COLUMNS = 100
 
 
 def _debug_log(msg):
@@ -150,6 +156,9 @@ def _capture_view_state(view):
         "line_numbers": view.settings().get("line_numbers"),
         "highlight_line": view.settings().get("highlight_line"),
         "margin": view.settings().get("margin"),
+        "font_face": view.settings().get("font_face"),
+        "word_wrap": view.settings().get("word_wrap"),
+        "wrap_width": view.settings().get("wrap_width"),
         "selections": [[s.a, s.b] for s in view.sel()],
         "viewport": list(view.viewport_position()),
         "folds": [[f.a, f.b] for f in view.folded_regions()],
@@ -205,6 +214,13 @@ def _restore_view_state(view, saved_state):
     else:
         view.settings().erase("margin")
 
+    for key in ("font_face", "word_wrap", "wrap_width"):
+        original = saved_state.get(key)
+        if original is not None:
+            view.settings().set(key, original)
+        else:
+            view.settings().erase(key)
+
     view.set_read_only(bool(orig_read_only))
 
     selections = (
@@ -245,11 +261,15 @@ class PreviewState(object):
         self.original_line_numbers = True
         self.original_highlight_line = None
         self.original_margin = None
+        self.original_font_face = None
         self.rendered_change_count = view.change_count()
         self.rendered_mtime = self._get_file_mtime()
         self.refresh_generation = 0
         self.control_generation = 0
         self.edit_control_mode = None
+        self.preview_columns = None
+        self.preview_inset_px = 0
+        self.layout_viewport_width = 0.0
         self.refresh_lock = threading.Lock()
 
     def _get_file_mtime(self):
@@ -277,6 +297,7 @@ class PreviewState(object):
         )
         self.original_highlight_line = state.get("highlight_line")
         self.original_margin = state.get("margin")
+        self.original_font_face = state.get("font_face")
         self.original_selections = [
             sublime.Region(r[0], r[1])
             for r in state.get("selections", [])
@@ -297,6 +318,7 @@ class PreviewState(object):
             "line_numbers": self.original_line_numbers,
             "highlight_line": self.original_highlight_line,
             "margin": self.original_margin,
+            "font_face": self.original_font_face,
             "selections": [[s.a, s.b] for s in self.original_selections],
             "viewport": list(self.original_viewport),
             "folds": [[f.a, f.b] for f in self.original_folds],
@@ -348,6 +370,38 @@ class PreviewState(object):
         except Exception:
             return True
 
+    def _should_use_hard_line_breaks(self):
+        """Return whether single source newlines inside a paragraph render as line breaks."""
+        try:
+            settings = sublime.load_settings(SETTINGS_NAME)
+            value = settings.get("hard_line_breaks")
+            if value is None:
+                return False
+            return bool(value)
+        except Exception:
+            return False
+
+    def _should_show_table_divider(self):
+        """Draw a vertical rule between table columns, as the grid cannot use cell borders."""
+        try:
+            settings = sublime.load_settings(SETTINGS_NAME)
+            value = settings.get("table_column_divider")
+            if value is None:
+                return True
+            return bool(value)
+        except Exception:
+            return True
+
+    def _should_wrap_code_blocks(self):
+        try:
+            settings = sublime.load_settings(SETTINGS_NAME)
+            value = settings.get("wrap_code_blocks")
+            if value is None:
+                return True
+            return bool(value)
+        except Exception:
+            return True
+
     def _get_source_position_ratio(self):
         """Calculate the normalized scroll ratio (0.0 - 1.0) of the source view's top visible line."""
         try:
@@ -377,6 +431,76 @@ class PreviewState(object):
 
         sublime.set_timeout(apply_scroll)
 
+    def _apply_preview_layout(self):
+        """Pick the preview reading measure.
+
+        The view's `margin` does not offset block phantoms, so the box is left at full
+        viewport width and the column is centered with padding inside the phantom instead.
+        """
+        view_settings = self.view.settings()
+        settings = sublime.load_settings(SETTINGS_NAME)
+
+        desired_font = settings.get("preview_font_family")
+        desired_font = desired_font.strip() if isinstance(desired_font, str) else ''
+        desired_font = desired_font or (self.original_font_face or '')
+        if (view_settings.get("font_face") or '') != desired_font:
+            # Metrics only settle once the new family is active, so re-render after it lands.
+            view_settings.set("font_face", desired_font)
+            sublime.set_timeout(self.refresh, 60)
+            return
+
+        viewport_width, _ = self.view.viewport_extent()
+        character_width = self.view.em_width()
+        if viewport_width <= 0 or character_width <= 0:
+            return
+
+        usable = max(40, int((viewport_width - 2 * PREVIEW_MARGIN) / character_width))
+        configured = settings.get("preview_wrap_width")
+        if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
+            columns = min(configured, usable)
+        else:
+            columns = min(usable, PREVIEW_READING_COLUMNS)
+
+        view_settings.set("word_wrap", True)
+        view_settings.set("wrap_width", 0)
+
+        text_width = columns * character_width
+        inset = max(PREVIEW_MARGIN, int((viewport_width - text_width) / 2))
+        self.preview_columns = columns
+        self.preview_inset_px = inset if inset * 2 < viewport_width else 0
+        _debug_log(
+            "preview layout: viewport={:.0f}px em={:.2f}px cols={} "
+            "measure={:.0f}px inset={}px applied={}".format(
+                viewport_width, character_width, columns, text_width,
+                self.preview_inset_px, bool(self.preview_inset_px))
+        )
+
+    def _preview_layout_css(self):
+        """Centering padding for the preview toolbar, in viewport pixels.
+
+        The document body is wrapped in its own padded div instead: padding on the
+        mdpopups wrapper class is not applied by minihtml.
+        """
+        inset = self.preview_inset_px
+        if inset <= 0:
+            return ''
+        px = str(inset) + 'px'
+        return (
+            '<style>.markdown-preview-overlay-toolbar-link'
+            '{padding-left:' + px + ';padding-right:' + px + '}</style>'
+        )
+
+    def _wrap_centered(self, body):
+        """Constrain the rendered document to the reading measure and center it."""
+        inset = self.preview_inset_px
+        if inset <= 0:
+            return body
+        px = str(inset) + 'px'
+        return (
+            '<div style="padding-left:' + px + ';padding-right:' + px + '">'
+            + body + '</div>'
+        )
+
     def _get_table_max_width(self):
         try:
             settings = sublime.load_settings(SETTINGS_NAME)
@@ -384,32 +508,39 @@ class PreviewState(object):
             if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                 return value
 
-            wrap_width = self.view.settings().get("wrap_width", 0)
-            if (isinstance(wrap_width, int)
-                    and not isinstance(wrap_width, bool)
-                    and wrap_width > 0):
-                return max(20, wrap_width - 8)
+            if self.preview_columns:
+                return max(20, self.preview_columns - 2)
 
             viewport_width, _ = self.view.viewport_extent()
             character_width = self.view.em_width()
             if viewport_width > 0 and character_width > 0:
                 return max(
                     20,
-                    int(viewport_width / character_width) - 8,
+                    int(viewport_width / character_width) - 4,
                 )
         except Exception:
             pass
         return 100
 
-    def _get_image_max_width(self):
-        """Calculate maximum display width for images, bounded by viewport width and settings."""
+    def _get_table_font_family(self):
+        """Match the table font to the view font, since the column budget is measured in it."""
         try:
-            viewport_width, _ = self.view.viewport_extent()
-            available = (
-                max(100, min(int(viewport_width * 0.96), int(viewport_width - 36)))
-                if viewport_width > 0
-                else None
-            )
+            return css_font_family(self.view.settings().get("font_face"))
+        except Exception:
+            return "monospace"
+
+    def _get_image_max_width(self):
+        """Calculate maximum display width for images, bounded by the reading column and settings."""
+        try:
+            if self.preview_columns:
+                available = int(self.preview_columns * self.view.em_width())
+            else:
+                viewport_width, _ = self.view.viewport_extent()
+                available = (
+                    max(100, min(int(viewport_width * 0.96), int(viewport_width - 36)))
+                    if viewport_width > 0
+                    else None
+                )
 
             settings = sublime.load_settings(SETTINGS_NAME)
             configured = settings.get("image_max_width")
@@ -464,10 +595,16 @@ class PreviewState(object):
             return
 
         self.view.erase_regions(ANNOTATION_KEY)
+        self._apply_preview_layout()
+        # The centering inset is baked into the markup as pixels, so remember which
+        # viewport it was computed for and re-render once that stops being true.
+        self.layout_viewport_width = self.view.viewport_extent()[0]
 
         anchor = self.view.size()
+        layout_css = self._preview_layout_css()
         toolbar = (
-            '<a class="markdown-preview-overlay-toolbar-link" '
+            layout_css
+            + '<a class="markdown-preview-overlay-toolbar-link" '
             'href="overlay:edit" title="Edit source">'
             '<div class="markdown-preview-overlay-toolbar">'
             '<span class="markdown-preview-overlay-arrow">◀</span>'
@@ -488,19 +625,31 @@ class PreviewState(object):
         ]
 
         markdown = self.view.substr(sublime.Region(0, self.view.size()))
+        markdown = normalize_list_indentation(markdown)
         file_name = self.view.file_name()
         if file_name and self._should_resolve_image_paths():
             max_img_width = self._get_image_max_width()
             markdown = resolve_markdown_image_paths(markdown, file_name, max_width=max_img_width)
         max_width = self._get_table_max_width()
-        markdown = render_markdown_tables_as_html(markdown, max_width)
+        markdown = render_markdown_tables_as_html(
+            markdown,
+            max_width,
+            font_family=self._get_table_font_family(),
+            column_separator='│' if self._should_show_table_divider() else '',
+        )
+        markdown = apply_render_settings(
+            markdown,
+            hard_line_breaks=self._should_use_hard_line_breaks(),
+            wrap_code_blocks=self._should_wrap_code_blocks(),
+        )
+        body = render_ordered_lists(mdpopups.md2html(self.view, markdown))
 
         phantoms.append(
             mdpopups.Phantom(
                 sublime.Region(anchor),
-                markdown,
+                self._wrap_centered(body),
                 sublime.LAYOUT_BLOCK,
-                md=True,
+                md=False,
                 css=OVERLAY_CSS,
                 on_navigate=self.on_navigate,
                 wrapper_class="markdown-preview-overlay-document"
@@ -571,7 +720,6 @@ class PreviewState(object):
         if self._should_hide_line_numbers():
             self.view.settings().set("line_numbers", False)
             self.view.settings().set("gutter", False)
-            self.view.settings().set("margin", PREVIEW_MARGIN)
         self.view.set_read_only(True)
         self._render_preview_overlay()
         self.rendered_change_count = self.view.change_count()
@@ -629,6 +777,10 @@ class PreviewState(object):
             return True
 
         if self.view.size() > 0 and not self.view.folded_regions():
+            return True
+
+        viewport_width = self.view.viewport_extent()[0]
+        if viewport_width > 0 and abs(viewport_width - self.layout_viewport_width) > 1.0:
             return True
 
         current_mtime = self._get_file_mtime()
@@ -1049,18 +1201,15 @@ def _on_settings_change():
                 else:
                     if not state.previewing:
                         state.render()
-                    else:
+                    elif is_preview:
                         if state._should_hide_line_numbers():
                             view.settings().set("line_numbers", False)
                             view.settings().set("gutter", False)
-                            view.settings().set("margin", PREVIEW_MARGIN)
                         else:
                             view.settings().set("line_numbers", state.original_line_numbers)
                             view.settings().set("gutter", state.original_gutter)
-                            if state.original_margin is not None:
-                                view.settings().set("margin", state.original_margin)
-                            else:
-                                view.settings().erase("margin")
+                        # Re-render so the width, centering and font pick up the new settings.
+                        state.schedule_refresh()
 
 
 def plugin_loaded():

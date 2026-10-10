@@ -15,8 +15,11 @@ class HtmlTableRenderer:
     _HTML_LINE_BREAK_RE = re.compile(r'<br\s*/?\s*>', re.IGNORECASE)
     _EXPLICIT_LINE_BREAK = '\n'
 
-    def __init__(self, max_width=100):
+    def __init__(self, max_width=100, font_family='monospace', column_separator='│'):
         self.max_width = max_width
+        self.font_family = font_family or 'monospace'
+        self.column_separator = column_separator or ''
+        self._separator_width = self.str_width(self.column_separator) if self.column_separator else 0
 
     def char_width(self, char):
         if unicodedata.combining(char):
@@ -65,7 +68,7 @@ class HtmlTableRenderer:
 
     def _fit_column_widths(self, natural_widths, max_table_width):
         column_count = len(natural_widths)
-        fixed_width = 2 * column_count
+        fixed_width = self._separator_width * max(0, column_count - 1) + 2 * column_count
         available = max_table_width - fixed_width
         minimum_width = 3
 
@@ -355,6 +358,16 @@ class HtmlTableRenderer:
                 )
 
         col_widths = self._fit_column_widths(natural_widths, self.max_width)
+        grid_width = (
+            sum(col_widths)
+            + 2 * len(col_widths)
+            + self._separator_width * max(0, len(col_widths) - 1)
+        )
+        gutter = ' ' * max(0, (self.max_width - grid_width) // 2)
+        separator = (
+            '<span class="tsep">{}</span>'.format(self.column_separator)
+            if self.column_separator else ''
+        )
         rendered = []
         for row_idx, styled_row in enumerate(display_rows):
             wrapped_cells = [
@@ -366,13 +379,16 @@ class HtmlTableRenderer:
             for line_idx in range(row_height):
                 pieces = []
                 for j, lines in enumerate(wrapped_cells):
+                    if j and separator:
+                        pieces.append(separator)
                     chars = lines[line_idx] if line_idx < len(lines) else []
                     padded = self._pad_styled_line(
                         chars, col_widths[j], alignments[j])
                     pieces.append(
                         ' ' + self._render_inline_html(padded) + ' ')
                 visual_lines.append(
-                    '<div class="visual-row">' + ''.join(pieces) + '</div>')
+                    '<div class="visual-row">{}{}</div>'.format(
+                        gutter, ''.join(pieces)))
 
             row_classes = ["logical-row"]
             if row_idx == 0:
@@ -386,20 +402,26 @@ class HtmlTableRenderer:
 
         return (
             '<style>'
-            '.table{color:var(--foreground);font-family:monospace;'
-            'font-size:1rem;line-height:1.25rem;white-space:pre;'
+            '.table{color:var(--foreground);font-family:' + self.font_family + ';'
+            'font-size:1rem;line-height:1.6em;white-space:pre;text-align:left;'
             'display:block;margin:0.8rem 0;'
             'border:1px solid color(var(--foreground) alpha(0.35));'
             'border-radius:2px}'
-            '.logical-row{margin:0;padding-top:0.4rem;'
-            'padding-bottom:0.4rem;'
+            '.logical-row{margin:0;padding-top:0.7rem;'
+            'padding-bottom:0.7rem;'
             'border-bottom:1px solid color(var(--foreground) alpha(0.2))}'
-            '.header-row{padding-top:0.45rem;padding-bottom:0.45rem;'
+            '.header-row{padding-top:0.75rem;padding-bottom:0.75rem;'
+            'font-weight:bold;'
+            'background-color:color(var(--foreground) alpha(0.07));'
             'border-bottom-color:'
             'color(var(--foreground) alpha(0.35))}'
             '.last-row{border-bottom-width:0}'
             '.visual-row{margin:0;padding:0}'
-            '.table code{font-family:monospace;color:var(--cyanish);'
+            '.table .tsep{color:color(var(--foreground) alpha(0.28))}'
+            # Columns align by character cell, so nothing inside a cell may shift
+            # the font metrics: same family and size as the cell, no padding, no border.
+            '.table code{font-family:' + self.font_family + ';font-size:1rem;'
+            'padding:0;border:0;border-radius:0;color:var(--cyanish);'
             'background-color:color(var(--foreground) alpha(0.08))}'
             '.table strong{font-weight:bold}'
             '</style><div class="table">' + ''.join(rendered) + '</div>'
@@ -460,9 +482,322 @@ class HtmlTableRenderer:
         return '\n'.join(output)
 
 
-def render_markdown_tables_as_html(text, max_width):
+CSS_UNSAFE_CHARS_RE = re.compile(r'''["'`;{}<>&\\/\r\n]''')
+
+
+def css_font_family(font_face):
+    """Quote the editor's font name for CSS so table cells match the measured advance width."""
+    name = CSS_UNSAFE_CHARS_RE.sub('', (font_face or '').strip())
+    return '"{}", monospace'.format(name) if name else 'monospace'
+
+
+def render_markdown_tables_as_html(text, max_width, font_family='monospace',
+                                   column_separator='│'):
     """Scan markdown for table blocks and convert them to adaptive miniHTML tables."""
-    return HtmlTableRenderer(max_width=max_width).transform_markdown(text)
+    return HtmlTableRenderer(
+        max_width=max_width,
+        font_family=font_family,
+        column_separator=column_separator,
+    ).transform_markdown(text)
+
+
+_LIST_MARKER_RE = re.compile(r'^(?P<indent>[ ]*)(?P<marker>[-*+]|[0-9]{1,9}[.)])(?=[ ]|$)')
+_CODE_FENCE_RE = re.compile(r'^[ ]*(?P<fence>`{3,}|~{3,})')
+LIST_INDENT_STEP = 4
+
+
+def _shift_indent(line, delta):
+    """Move a line's leading indentation by `delta` columns, keeping the content intact."""
+    if delta == 0 or not line:
+        return line
+    stripped = line.lstrip(' ')
+    return ' ' * max(0, len(line) - len(stripped) + delta) + stripped
+
+
+def normalize_list_indentation(text):
+    """Re-indent nested list blocks onto 4-column steps.
+
+    Python-Markdown's list parser only nests items indented by a full tab length,
+    so the CommonMark style `1.` / `   - sub` (3 columns) flattens into siblings.
+    """
+    lines = text.expandtabs(4).split('\n')
+    output = []
+    levels = []
+    delta = 0
+    fence = None
+
+    for line in lines:
+        fence_match = _CODE_FENCE_RE.match(line)
+
+        if fence is not None:
+            if fence_match and fence_match.group('fence')[0] == fence[0] \
+                    and len(fence_match.group('fence')) >= len(fence):
+                fence = None
+            output.append(_shift_indent(line, delta))
+            continue
+
+        if fence_match:
+            fence = fence_match.group('fence')
+            output.append(_shift_indent(line, delta))
+            continue
+
+        match = _LIST_MARKER_RE.match(line)
+        if match:
+            indent = len(match.group('indent'))
+            while levels and levels[-1] > indent:
+                levels.pop()
+            if levels and levels[-1] == indent:
+                level = len(levels) - 1
+            else:
+                level = len(levels)
+                levels.append(indent)
+            target = level * LIST_INDENT_STEP
+            delta = target - indent
+            output.append(' ' * target + line.lstrip(' '))
+            continue
+
+        if not line.strip():
+            output.append(line)
+            continue
+
+        indent = len(line) - len(line.lstrip(' '))
+        if indent == 0:
+            levels = []
+            delta = 0
+            output.append(line)
+        else:
+            output.append(_shift_indent(line, delta))
+
+    return '\n'.join(output)
+
+
+_VOID_TAGS = frozenset((
+    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+    'link', 'meta', 'param', 'source', 'track', 'wbr',
+))
+_HTML_TAG_RE = re.compile(
+    r'<(/?)([A-Za-z][A-Za-z0-9-]*)((?:"[^"]*"|\'[^\']*\'|[^>"\'])*?)(/?)>', re.S
+)
+_ATTR_RE = re.compile(r'(\w[\w:-]*)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
+_OL_NUMERAL_MAP = {
+    '1': 'decimal', 'a': 'lower-alpha', 'A': 'upper-alpha',
+    'i': 'lower-roman', 'I': 'upper-roman',
+}
+_ROMAN_VALUES = (
+    (1000, 'm'), (900, 'cm'), (500, 'd'), (400, 'cd'), (100, 'c'),
+    (90, 'xc'), (50, 'l'), (40, 'xl'), (10, 'x'), (9, 'ix'),
+    (5, 'v'), (4, 'iv'), (1, 'i'),
+)
+
+
+def _parse_html(source):
+    """Build a light element tree from well-formed markup: [tag, attrs, children, self_closing]."""
+    root = [None, None, [], False]
+    stack = [root]
+    pos = 0
+
+    for match in _HTML_TAG_RE.finditer(source):
+        if match.start() > pos:
+            stack[-1][2].append(source[pos:match.start()])
+        pos = match.end()
+
+        closing, tag = match.group(1), match.group(2).lower()
+        attrs, self_closing = match.group(3), match.group(4) == '/'
+
+        if closing:
+            for index in range(len(stack) - 1, 0, -1):
+                if stack[index][0] == tag:
+                    del stack[index:]
+                    break
+            else:
+                stack[-1][2].append(match.group(0))
+            continue
+
+        node = [tag, attrs, [], self_closing]
+        stack[-1][2].append(node)
+        if not self_closing and tag not in _VOID_TAGS:
+            stack.append(node)
+
+    if pos < len(source):
+        stack[-1][2].append(source[pos:])
+    return root
+
+
+def _element_attrs(attrs):
+    return {
+        name: (double or single or '')
+        for name, double, single in _ATTR_RE.findall(attrs or '')
+    }
+
+
+def _roman(numeral):
+    value = ''
+    for total, symbol in _ROMAN_VALUES:
+        while numeral >= total:
+            value += symbol
+            numeral -= total
+    return value
+
+
+def _alpha(numeral):
+    value = ''
+    while numeral > 0:
+        numeral, remainder = divmod(numeral - 1, 26)
+        value = chr(ord('a') + remainder) + value
+    return value
+
+
+def _list_marker(index, style):
+    if style == 'lower-alpha':
+        return _alpha(index)
+    if style == 'upper-alpha':
+        return _alpha(index).upper()
+    if style == 'lower-roman':
+        return _roman(index)
+    if style == 'upper-roman':
+        return _roman(index).upper()
+    return str(index)
+
+
+def _render_children(node, depth):
+    return ''.join(_render_node(child, depth) for child in node[2])
+
+
+def _render_node(node, depth):
+    """Serialize a parsed node, rewriting lists into markup minihtml can display."""
+    if isinstance(node, str):
+        return node
+
+    tag, attrs, _, self_closing = node
+
+    if tag == 'ol':
+        return _render_ordered_list(node, depth + 1)
+    if tag == 'ul':
+        return _render_unordered_list(node, depth + 1)
+
+    if self_closing or tag in _VOID_TAGS:
+        return '<{}{}/>'.format(tag, attrs or '')
+    if tag is None:
+        return _render_children(node, depth)
+    return '<{}{}>{}</{}>'.format(tag, attrs or '', _render_children(node, depth), tag)
+
+
+def _render_unordered_list(node, depth):
+    """Keep native bullets, tagging each nesting level so minihtml can vary the glyph."""
+    level = min(depth, 3)
+    pieces = []
+    for child in node[2]:
+        if isinstance(child, list) and child[0] == 'li':
+            classes = ' '.join(filter(None, (
+                _element_attrs(child[1]).get('class'), 'md-li-{}'.format(level))))
+            pieces.append('<li class="{classes}">{body}</li>'.format(
+                classes=classes, body=_render_children(child, depth)))
+        else:
+            pieces.append(_render_node(child, depth))
+    return '<ul class="md-ul md-ul-{level}">{body}</ul>'.format(
+        level=level, body=''.join(pieces))
+
+
+def _render_ordered_list(node, depth):
+    """Replace an ordered list with divs carrying literal markers, as minihtml has no decimal bullets."""
+    attrs = _element_attrs(node[1])
+    style = _OL_NUMERAL_MAP.get(attrs.get('type', '1'), 'decimal')
+    try:
+        start = int(attrs.get('start', '1'))
+    except ValueError:
+        start = 1
+
+    items = [child for child in node[2] if isinstance(child, list) and child[0] == 'li']
+    markers = [_list_marker(start + i, style) + '.' for i in range(len(items))]
+    marker_width = max((len(marker) for marker in markers), default=1)
+    indent = '{:.2f}em'.format(0.62 * marker_width + 0.55)
+
+    rendered = []
+    marker_index = 0
+    for child in node[2]:
+        if not (isinstance(child, list) and child[0] == 'li'):
+            rendered.append(_render_node(child, depth))
+            continue
+
+        marker = markers[marker_index]
+        marker_index += 1
+        pieces = [
+            '<div class="md-li" style="padding-left:{indent}">'.format(indent=indent),
+            # Inline margins are ignored by minihtml; relative offset paints the
+            # marker into the cell's padding without reflowing the text.
+            '<span class="md-mk" style="position:relative;left:-{indent}">'
+            '{marker}</span>'.format(indent=indent, marker=marker),
+        ]
+        pieces.extend(_render_ordered_list_item_body(child, depth))
+        pieces.append('</div>')
+        rendered.append(''.join(pieces))
+
+    return '<div class="md-ol">{}</div>'.format(''.join(rendered))
+
+
+def _render_ordered_list_item_body(item, depth):
+    """Render `<li>` content, lifting a leading paragraph into the marker's own line."""
+    children = list(item[2])
+    if children and isinstance(children[0], list) and children[0][0] == 'p':
+        children = children[0][2] + children[1:]
+    return [_render_node(child, depth) for child in children]
+
+
+def render_ordered_lists(html):
+    """Rewrite ordered lists and nested unordered lists so markers survive minihtml rendering."""
+    root = _parse_html(html)
+    return ''.join(_render_node(child, 0) for child in root[2])
+
+
+DOCUMENT_FRONT_MATTER_RE = re.compile(
+    r'\A---[ \t]*\r?\n(?!\r?\n)(.*?\n?)(?:---|\.{3})[ \t]*\r?\n', re.S
+)
+YAML_KEY_RE = re.compile(r'^[ \t]*[A-Za-z_][\w.-]*[ \t]*:')
+
+DEFAULT_MARKDOWN_EXTENSIONS = (
+    'markdown.extensions.admonition',
+    'markdown.extensions.attr_list',
+    'markdown.extensions.def_list',
+    'pymdownx.betterem',
+    'pymdownx.magiclink',
+    'markdown.extensions.md_in_html',
+    'markdown.extensions.nl2br',
+)
+
+
+def _split_front_matter(markdown_text):
+    """Return (front_matter_body, remainder), treating only real YAML mappings as front matter."""
+    match = DOCUMENT_FRONT_MATTER_RE.match(markdown_text)
+    if not match or not YAML_KEY_RE.match(match.group(1)):
+        return None, markdown_text
+    return match.group(1), markdown_text[match.end():]
+
+
+def apply_render_settings(markdown_text, hard_line_breaks=False, wrap_code_blocks=True):
+    """Prepend the front matter that pins mdpopups' Markdown extension set for the overlay.
+
+    mdpopups enables `nl2br` by default, which turns every hard-wrapped source line of
+    prose into a line break. An author who declares the key themselves is left alone.
+    """
+    existing, remainder = _split_front_matter(markdown_text)
+    declared = set(re.findall(r'^[ \t]*([A-Za-z_][\w.-]*)[ \t]*:', existing or '', re.M))
+
+    additions = []
+    if 'markdown_extensions' not in declared:
+        extensions = [
+            name for name in DEFAULT_MARKDOWN_EXTENSIONS
+            if hard_line_breaks or not name.endswith('nl2br')
+        ]
+        additions.append('markdown_extensions:\n' + ''.join(
+            '- {}\n'.format(name) for name in extensions))
+    if 'allow_code_wrap' not in declared:
+        additions.append('allow_code_wrap: {}\n'.format(
+            'true' if wrap_code_blocks else 'false'))
+
+    if not additions:
+        return markdown_text
+
+    return '---\n{}{}---\n\n{}'.format(existing or '', ''.join(additions), remainder)
 
 
 def get_image_size(file_path):

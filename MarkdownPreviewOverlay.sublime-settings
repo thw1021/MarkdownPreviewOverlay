@@ -23,6 +23,11 @@
     // When null (default), the width dynamically adapts to the editor viewport width.
     "table_max_width": null,
 
+    // Whether to draw a vertical rule between Markdown table columns.
+    // miniHTML cannot border table cells, so the rule is a box-drawing character placed
+    // on the column boundary. Set to false if your font renders it wider than one column.
+    "table_column_divider": true,
+
     // Whether to resolve local relative image paths to absolute file:// URIs and adapt image dimensions in preview mode.
     // When true (default), local relative image links are automatically resolved and large images adapt to the viewport.
     // Set to false if you prefer image paths in Markdown to be left untouched.
@@ -34,6 +39,28 @@
     // In narrower viewports or split views, images automatically downscale to fit the viewport.
     // Set to null to remove the fixed cap and always adapt purely to viewport width.
     "image_max_width": 900,
+
+    // Whether single newlines inside a paragraph should render as line breaks.
+    // When false (default), source lines of one paragraph flow together like GitHub does,
+    // which is what hard-wrapped prose needs. Set to true to keep every newline visible.
+    // Documents that declare their own `markdown_extensions` front matter keep their setting.
+    "hard_line_breaks": false,
+
+    // Whether fenced code blocks wrap instead of running past the right edge.
+    // When true (default), long lines fold inside the block. Set to false to clip them instead.
+    "wrap_code_blocks": true,
+
+    // Column width used by the preview, in characters.
+    // When null (default) the reading column is a fixed 100 columns that only re-centers
+    // as you resize the window; it ignores your editor's `wrap_width`.
+    // Set a number for a different fixed measure, or a large value to fill the window.
+    "preview_wrap_width": null,
+
+    // Font family used while previewing, e.g. "Noto Sans CJK SC".
+    // When null (default) the editor font is kept. Monospace CJK fonts reserve a
+    // double-width cell per ideograph, which reads as wide gaps between characters;
+    // a proportional CJK font tightens that up without touching your editing font.
+    "preview_font_family": null,
 
     // Number of lines to scroll per arrow key press (Up/Down) when in preview mode.
     // Default is 3.0 lines.

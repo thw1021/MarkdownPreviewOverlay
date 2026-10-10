@@ -31,20 +31,22 @@ a.markdown-preview-overlay-preview-icon {
     padding: 0 0.15rem 0 0.1rem;
     margin-right: 0.1rem;
     font-size: 1.15rem;
-    line-height: 1;
+    line-height: 1em;
     text-decoration: none;
     color: var(--cyanish);
     {{'background'|css('background-color')}}
 }
 .markdown-preview-overlay-document {
-    padding: 0.8rem 1.4rem 3rem 1.4rem;
-    line-height: 1.35;
+    /* Horizontal inset comes from the view's `margin`, which also centers the column. */
+    padding: 0.8rem 0 3rem 0;
+    line-height: 1.65em;
     font-size: 1rem;
     {{'background'|css('background-color')}}
 }
 .markdown-preview-overlay-document p {
-    margin: 0.6rem 0;
-    line-height: 1.35;
+    margin: 0.75rem 0;
+    line-height: 1.65em;
+    text-align: justify;
 }
 .markdown-preview-overlay-document h1,
 .markdown-preview-overlay-document h2,
@@ -53,20 +55,16 @@ a.markdown-preview-overlay-preview-icon {
 .markdown-preview-overlay-document h5,
 .markdown-preview-overlay-document h6 {
     font-weight: bold;
-    line-height: 1.3;
+    line-height: 1.3em;
     color: var(--foreground);
 }
 .markdown-preview-overlay-document h1 {
     font-size: 1.85rem;
     margin: 1.8rem 0 1rem;
-    padding-bottom: 0.4rem;
-    border-bottom: 1px solid color(var(--foreground) alpha(0.18));
 }
 .markdown-preview-overlay-document h2 {
     font-size: 1.45rem;
-    margin: 1.5rem 0 0.8rem;
-    padding-bottom: 0.35rem;
-    border-bottom: 1px solid color(var(--foreground) alpha(0.14));
+    margin: 1.6rem 0 0.9rem;
 }
 .markdown-preview-overlay-document h3 {
     font-size: 1.2rem;
@@ -83,21 +81,51 @@ a.markdown-preview-overlay-preview-icon {
 }
 .markdown-preview-overlay-document ul,
 .markdown-preview-overlay-document ol {
-    margin: 0.6rem 0;
+    margin: 0.75rem 0;
     padding-left: 1.8rem;
 }
 .markdown-preview-overlay-document li {
-    margin: 0.25rem 0;
-    line-height: 1.35;
+    margin: 0.35rem 0;
+    line-height: 1.6em;
+    text-align: justify;
 }
-.markdown-preview-overlay-document li > p {
+.markdown-preview-overlay-document li p {
     margin: 0.3rem 0;
 }
+/* Ordered lists are rebuilt as divs: minihtml only draws disc/circle/square bullets. */
+.markdown-preview-overlay-document .md-ol {
+    display: block;
+    margin: 0.75rem 0;
+}
+.markdown-preview-overlay-document .md-li {
+    display: block;
+    margin: 0.35rem 0;
+    line-height: 1.6em;
+    text-align: justify;
+}
+.markdown-preview-overlay-document .md-mk {
+    display: inline-block;
+    margin-right: 0.2rem;
+    font-weight: bold;
+    color: color(var(--foreground) blend(var(--cyanish) 35%));
+}
+.markdown-preview-overlay-document .md-li p {
+    margin: 0.3rem 0;
+}
+.markdown-preview-overlay-document .md-ul-2,
+.markdown-preview-overlay-document .md-li-2 {
+    list-style-type: circle;
+}
+.markdown-preview-overlay-document .md-ul-3,
+.markdown-preview-overlay-document .md-li-3 {
+    list-style-type: square;
+}
 .markdown-preview-overlay-document code {
-    font-family: var(--font-mono);
+    font-family: var(--mdpopups-font-mono);
     font-size: 0.9em;
     background-color: color(var(--background) blend(var(--foreground) 90%));
-    padding: 0.15rem 0.35rem;
+    border: 0;
+    padding: 0 0.15rem;
     border-radius: 3px;
 }
 .markdown-preview-overlay-document pre {
@@ -106,7 +134,7 @@ a.markdown-preview-overlay-preview-icon {
     border-radius: 6px;
     padding: 0.9rem 1.1rem;
     margin: 1rem 0;
-    line-height: 1.45;
+    line-height: 1.45em;
 }
 .markdown-preview-overlay-document pre code {
     background-color: transparent;
@@ -122,7 +150,7 @@ a.markdown-preview-overlay-preview-icon {
     background-color: color(var(--background) blend(var(--foreground) 97%));
     border-radius: 0 4px 4px 0;
 }
-.markdown-preview-overlay-document blockquote > p {
+.markdown-preview-overlay-document blockquote p {
     margin: 0.3rem 0;
 }
 .markdown-preview-overlay-document table {
@@ -139,14 +167,10 @@ a.markdown-preview-overlay-preview-icon {
     font-weight: bold;
     background-color: color(var(--background) blend(var(--foreground) 92%));
 }
-.markdown-preview-overlay-document tr:nth-child(even) {
-    background-color: color(var(--background) blend(var(--foreground) 97%));
-}
 .markdown-preview-overlay-document hr {
     border: 0;
-    height: 2px;
-    background-color: color(var(--foreground) alpha(0.15));
-    margin: 1.8rem 0;
+    border-top: 3px solid color(var(--foreground) alpha(0.12));
+    margin: 2rem 0;
 }
 .markdown-preview-overlay-document a {
     color: var(--accent);
@@ -170,7 +194,7 @@ ANNOTATION_HTML = """
             display: inline-block;
             color: var(--cyanish);
             font-weight: bold;
-            line-height: 1;
+            line-height: 1em;
             text-decoration: none;
         }
         span.preview-icon {
